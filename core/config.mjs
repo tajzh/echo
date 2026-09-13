@@ -12,6 +12,7 @@ export const PATHS = {
   turns: path.join(HOME, "turns.jsonl"),
   state: path.join(HOME, "state.json"),
   favorites: path.join(HOME, "favorites.json"),
+  config: path.join(HOME, "config.json"),
   pid: path.join(HOME, "server.pid"),
   log: path.join(HOME, "server.log"),
 };

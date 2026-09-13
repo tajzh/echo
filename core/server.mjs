@@ -4,7 +4,8 @@ import { HOST, PORT, PATHS, ensureHome, BACKEND } from "./config.mjs";
 import { appendTurn, updateTurn, latest, turnsSince, readState, writeState, readFavorites, toggleFavorite, onChange } from "./store.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { dose, simulatedAgentReply, describeBackend } from "./translate.mjs";
+import { dose, simulatedAgentReply, describeBackend, complete, currentBackend, PROMPTS } from "./translate.mjs";
+import { harnessStatus, setHarness, backendOptions, readConfig, writeConfig, maskBackend } from "./setup.mjs";
 import { notify, notifySupported } from "./notify.mjs";
 
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web");
@@ -133,6 +134,30 @@ const server = http.createServer(async (req, res) => {
       const ka = setInterval(() => res.write(`: keepalive\n\n`), 15000);
       req.on("close", () => { off(); clearInterval(ka); });
       return;
+    }
+    // Settings panel: harnesses + model backend.
+    if (req.method === "GET" && url.pathname === "/setup") {
+      return json(res, 200, { harnesses: harnessStatus(), backend: maskBackend(currentBackend()), fromConfig: Boolean(readConfig().backend), backendOptions: backendOptions(), platform: process.platform, home: process.env.HOME });
+    }
+    if (req.method === "POST" && url.pathname === "/setup/harness") {
+      const body = await readBody(req);
+      try { return json(res, 200, setHarness(body.id, body.enabled)); } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (req.method === "POST" && url.pathname === "/setup/backend") {
+      const body = await readBody(req);
+      const b = body.backend || {};
+      if (!b.type) return json(res, 400, { error: "need backend.type" });
+      // Keep the stored key if the form sent back the masked one.
+      const prev = readConfig().backend;
+      if (b.apiKey && b.apiKey.includes("…") && prev?.apiKey) b.apiKey = prev.apiKey;
+      if (body.test) {
+        const t0 = Date.now();
+        try { const en = await complete(PROMPTS.youSaid, "这个 PR 先别合，等 QA 跑完再说", b); return json(res, 200, { ok: true, en: en.trim(), ms: Date.now() - t0 }); }
+        catch (e) { return json(res, 200, { ok: false, error: e.message, ms: Date.now() - t0 }); }
+      }
+      writeConfig({ backend: b });
+      log(`backend set: ${describeBackend(b)}`);
+      return json(res, 200, { backend: maskBackend(b) });
     }
     if (req.method === "GET" && url.pathname === "/favorites") return json(res, 200, { favorites: readFavorites() });
     if (req.method === "POST" && url.pathname === "/favorites/toggle") {

@@ -38,6 +38,18 @@
   .pending { color:var(--dim); }
   .empty { color:var(--dim); text-align:center; padding:30px 0; }
   .tabs { display:flex; gap:6px; margin-top:6px; }
+  .setup .row { display:flex; gap:10px; align-items:flex-start; padding:8px 2px; border-top:1px solid var(--line); }
+  .setup .row .t { flex:1; }
+  .setup .row .t small { display:block; color:var(--dim); font-size:11px; margin-top:2px; }
+  .setup .row .t code { font-size:11px; color:var(--dim); }
+  .setup .off { opacity:.55; }
+  .setup label { display:block; font-size:12px; color:var(--dim); margin:8px 0 3px; }
+  .setup input, .setup select { width:100%; background:var(--panel); border:1px solid var(--line); color:var(--fg); border-radius:7px; padding:6px 8px; font:inherit; font-size:13px; }
+  .setup .actions { display:flex; gap:8px; margin-top:10px; align-items:center; }
+  .setup .result { font-size:12px; color:var(--dim); margin-top:6px; white-space:pre-wrap; }
+  .setup .result.ok { color:var(--green); } .setup .result.err { color:#e07a7a; }
+  .badge { font-size:11px; padding:1px 6px; border-radius:5px; border:1px solid var(--line); color:var(--dim); }
+  .badge.on { color:var(--green); border-color:#2f5a3a; }
 </style>
 </head>
 <body>
@@ -54,9 +66,11 @@
   <div class="tabs">
     <button class="btn on" data-tab="today">今天</button>
     <button class="btn" data-tab="favs">收藏 <span id="favcount"></span></button>
+    <button class="btn" data-tab="setup">设置</button>
   </div>
   <section id="today"></section>
   <section id="favs" class="favs" hidden></section>
+  <section id="setup" class="setup" hidden></section>
 </main>
 <script>
 const $ = (s, r = document) => r.querySelector(s);
@@ -100,10 +114,11 @@ function render() {
   $("#lvl").textContent = `Lv ${level}`; $("#lvl").classList.toggle("on", level === 1);
 }
 
+async function loadState() { try { const h = await api("GET", "health"); $("#status").textContent = h.model; } catch { $("#status").textContent = "core 不可用"; } }
 async function load() {
   const [r, f, s] = await Promise.all([api("GET", "recent?n=50"), api("GET", "favorites"), api("GET", "state")]);
   turns = r.turns.reverse(); setFavs(f.favorites); level = s.level || 0; render();
-  $("#status").textContent = "";
+  loadState();
 }
 function setFavs(list) { favs = list; favWords = new Set(list.filter((f) => f.kind === "word").map((f) => f.key)); favSentences = new Set(list.filter((f) => f.kind === "sentence").map((f) => f.text)); }
 
@@ -115,7 +130,48 @@ document.addEventListener("click", async (e) => {
   const x = e.target.closest(".favs .x");
   if (x) { const f = x.closest(".f"); const r = await api("POST", "favorites/toggle", { kind: f.dataset.kind, text: f.dataset.text }); setFavs(r.favorites); render(); return; }
   const tab = e.target.closest("[data-tab]");
-  if (tab) { document.querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("on", b === tab)); $("#today").hidden = tab.dataset.tab !== "today"; $("#favs").hidden = tab.dataset.tab !== "favs"; }
+  if (tab) { document.querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("on", b === tab)); for (const id of ["today", "favs", "setup"]) $("#" + id).hidden = tab.dataset.tab !== id; if (tab.dataset.tab === "setup") loadSetup(); }
+  const hz = e.target.closest("[data-harness]");
+  if (hz) { hz.disabled = true; await api("POST", "setup/harness", { id: hz.dataset.harness, enabled: hz.dataset.enabled !== "1" }); loadSetup(); return; }
+});
+
+// ---- settings: harnesses + model backend ----
+let setup = null;
+function backendForm() {
+  const b = setup.backend, opt = setup.backendOptions.find((o) => o.id === b.type) || setup.backendOptions[0];
+  const f = (name, label, value, type = "text", ph = "") => `<label>${label}</label><input name="${name}" type="${type}" value="${esc(value ?? "")}" placeholder="${esc(ph)}">`;
+  let fields = "";
+  if (opt.fields.includes("model")) fields += f("model", "模型", b.type === opt.id ? b.model : opt.defaults.model, "text", opt.defaults.model || "留空用默认");
+  if (opt.fields.includes("baseUrl")) fields += f("baseUrl", "Base URL", b.type === opt.id ? b.baseUrl : opt.defaults.baseUrl);
+  if (opt.fields.includes("apiKey")) fields += f("apiKey", "API Key（只存在本机 ~/.echo/config.json，600 权限）", b.type === opt.id ? b.apiKey : "", "password");
+  if (opt.fields.includes("name")) fields += f("name", "模型名", b.type === opt.id ? b.name : opt.defaults.name);
+  if (opt.fields.includes("extra")) fields += f("extra", "额外请求参数 JSON（留空按端点自动关思考）", b.type === opt.id ? (typeof b.extra === "string" ? b.extra : JSON.stringify(b.extra || {})) : "", "text", '{"thinking":{"type":"disabled"}}');
+  return `<label>翻译 / 概括用哪个模型</label>
+    <select name="type">${setup.backendOptions.map((o) => `<option value="${o.id}" ${o.id === opt.id ? "selected" : ""} ${o.present ? "" : "disabled"}>${esc(o.label)}${o.present ? "" : "（本机未检测到）"}</option>`).join("")}</select>
+    ${opt.note ? `<small style="color:var(--dim)">${esc(opt.note)}</small>` : ""}
+    ${fields}
+    <div class="actions"><button class="btn" id="bk-test">测试</button><button class="btn on" id="bk-save">保存并启用</button><span class="badge ${setup.fromConfig ? "on" : ""}">${setup.fromConfig ? "来自设置" : "来自环境变量/默认"}</span></div>
+    <div class="result" id="bk-result"></div>`;
+}
+function renderSetup() {
+  if (!setup) return;
+  $("#setup").innerHTML = `<h2>接入的 harness</h2>` + setup.harnesses.map((h) => `
+    <div class="row ${h.present ? "" : "off"}"><div class="t">${esc(h.label)} <span class="badge ${h.enabled ? "on" : ""}">${h.enabled ? "已接入" : h.present ? "未接入" : "未检测到"}</span>
+      <small>${esc(h.display)}${h.note ? " · " + esc(h.note) : ""}</small><code>${esc(h.file)}</code></div>
+      <button class="btn ${h.enabled ? "" : "on"}" data-harness="${h.id}" data-enabled="${h.enabled ? 1 : 0}" ${h.present || h.enabled ? "" : "disabled"}>${h.enabled ? "移除" : "接入"}</button></div>`).join("")
+    + `<h2 style="margin-top:18px">模型</h2><div id="bk">${backendForm()}</div>
+    <small style="display:block;color:var(--dim);margin-top:14px">配置作用于运行 echo core 的这台机器（${esc(setup.home)}，${esc(setup.platform)}）。harness 配置文件改动前会留一份 .echo-bak。</small>`;
+}
+async function loadSetup() { setup = await api("GET", "setup"); renderSetup(); }
+function readForm() {
+  const form = $("#bk"); const b = { type: form.querySelector('[name=type]').value };
+  for (const inp of form.querySelectorAll("input")) b[inp.name] = inp.value;
+  return b;
+}
+document.addEventListener("change", (e) => { if (e.target.name === "type" && setup) { setup.backend = { ...setup.backend, type: e.target.value }; $("#bk").innerHTML = backendForm(); } });
+document.addEventListener("click", async (e) => {
+  if (e.target.id === "bk-test") { const r = $("#bk-result"); r.textContent = "测试中…"; r.className = "result"; const out = await api("POST", "setup/backend", { backend: readForm(), test: true }); r.textContent = out.ok ? `${out.ms} ms · ${out.en}` : `失败（${out.ms} ms）：${out.error}`; r.className = "result " + (out.ok ? "ok" : "err"); }
+  if (e.target.id === "bk-save") { const r = $("#bk-result"); const out = await api("POST", "setup/backend", { backend: readForm() }); r.textContent = out.error ? out.error : "已保存，下一轮起生效"; r.className = "result " + (out.error ? "err" : "ok"); loadSetup(); loadState(); }
 });
 $("#lvl").addEventListener("click", async () => { const s = await api("POST", "state", { level: level ? 0 : 1 }); level = s.level; render(); });
 
@@ -137,7 +193,7 @@ function connect() {
   const es = new EventSource("events");
   es.addEventListener("turn", (e) => { const { turn } = JSON.parse(e.data); const i = turns.findIndex((t) => t.id === turn.id); if (i >= 0) turns[i] = turn; else turns.push(turn); render(); });
   es.onerror = () => { es.close(); $("#status").textContent = "重连中…"; setTimeout(connect, 2000); };
-  es.onopen = () => { $("#status").textContent = ""; };
+  es.onopen = () => { loadState(); };
 }
 load(); connect();
 </script>
