@@ -1,0 +1,13 @@
+{
+  "name": "echo",
+  "version": "0.0.1-demo",
+  "description": "Learn English from the conversations you already have with your agents. Agent-agnostic observer: a local core plus thin adapters.",
+  "type": "module",
+  "private": true,
+  "bin": { "echo": "bin/echo.mjs" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node core/server.mjs",
+    "demo": "node bin/echo.mjs demo"
+  }
+}

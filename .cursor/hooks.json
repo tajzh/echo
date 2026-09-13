@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      { "command": "node bin/echo.mjs hook cursor-prompt", "timeout": 10 }
+    ],
+    "afterAgentResponse": [
+      { "command": "node bin/echo.mjs hook cursor-response", "timeout": 10 }
+    ]
+  }
+}

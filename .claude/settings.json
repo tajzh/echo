@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/bin/echo.mjs\" hook cc-prompt", "timeout": 10 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/bin/echo.mjs\" hook cc-stop", "timeout": 10 } ] }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "node bin/echo.mjs statusline"
+  }
+}
