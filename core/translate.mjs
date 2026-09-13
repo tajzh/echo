@@ -51,14 +51,40 @@ export function simulatedAgentReply(text) {
 
 export { PROMPTS };
 
-// A backend spec: {type:"openai", baseUrl, apiKey, name, extra} | {type:"claude-cli", model}
+// A backend spec: {type:"openai", baseUrl, apiKey, name, extra} | {type:"claude-cli", model} | {type:"pi-cli", model}
 export const DEFAULT_BACKEND = BACKEND === "openai"
   ? { type: "openai", baseUrl: MODEL.baseUrl, apiKey: MODEL.apiKey, name: MODEL.name, extra: MODEL.extra }
+  : BACKEND === "pi-cli" ? { type: "pi-cli", model: MODEL.piModel }
   : { type: "claude-cli", model: MODEL.claudeModel };
+
+export function describeBackend(b = DEFAULT_BACKEND) {
+  return b.type === "openai" ? `${b.name}` : b.type === "pi-cli" ? `pi:${b.model}` : `claude:${b.model}`;
+}
 
 export async function complete(system, user, backend = DEFAULT_BACKEND) {
   if (backend.type === "openai") return completeOpenAI(system, user, backend);
+  if (backend.type === "pi-cli") return completePiCli(system, user, backend);
   return completeClaudeCli(system, user, backend);
+}
+
+function runCli(cmd, args, label) {
+  return new Promise((resolve, reject) => {
+    // ECHO_INTERNAL: echo's own hooks see it and exit, so the model call never recurses into echo.
+    const env = { ...process.env, ECHO_INTERNAL: "1" };
+    for (const k of Object.keys(env)) if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_ENTRYPOINT")) delete env[k];
+    const child = spawn(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"], cwd: process.env.HOME });
+    let out = "", err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(`${label} exit ${code}: ${err.slice(0, 200)}`))));
+  });
+}
+
+// pi in print mode, stripped to a bare completion: no tools, no session, no extensions/skills/context files, thinking off.
+function completePiCli(system, user, b) {
+  return runCli("pi", ["-p", "--no-tools", "--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files",
+    "--thinking", "off", "--model", b.model, "--system-prompt", system, "--", user], "pi -p");
 }
 
 async function completeOpenAI(system, user, b) {
@@ -78,20 +104,7 @@ async function completeOpenAI(system, user, b) {
   return json.choices?.[0]?.message?.content ?? "";
 }
 
+// claude in print mode; --tools "" makes it a pure text completion.
 function completeClaudeCli(system, user, b) {
-  return new Promise((resolve, reject) => {
-    // Strip nested-session markers so `claude -p` runs even when echo was started from inside Claude Code.
-    // ECHO_INTERNAL: echo's own hooks see it and exit, so the translation call never recurses.
-    const env = { ...process.env, ECHO_INTERNAL: "1" };
-    for (const k of Object.keys(env)) if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_ENTRYPOINT")) delete env[k];
-    // --tools "": pure text completion, no tool use.
-    const child = spawn("claude", ["-p", "--model", b.model, "--output-format", "text", "--tools", "", "--system-prompt", system, "--", user], {
-      env, stdio: ["ignore", "pipe", "pipe"], cwd: process.env.HOME,
-    });
-    let out = "", err = "";
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (err += d));
-    child.on("error", reject);
-    child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(`claude -p exit ${code}: ${err.slice(0, 200)}`))));
-  });
+  return runCli("claude", ["-p", "--model", b.model, "--output-format", "text", "--tools", "", "--system-prompt", system, "--", user], "claude -p");
 }

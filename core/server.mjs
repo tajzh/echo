@@ -1,10 +1,10 @@
 import http from "node:http";
 import fs from "node:fs";
-import { HOST, PORT, PATHS, ensureHome, BACKEND, MODEL } from "./config.mjs";
+import { HOST, PORT, PATHS, ensureHome, BACKEND } from "./config.mjs";
 import { appendTurn, updateTurn, latest, turnsSince, readState, writeState, readFavorites, toggleFavorite, onChange } from "./store.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { dose, simulatedAgentReply } from "./translate.mjs";
+import { dose, simulatedAgentReply, describeBackend } from "./translate.mjs";
 import { notify, notifySupported } from "./notify.mjs";
 
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web");
@@ -98,7 +98,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}`);
   try {
     if (req.method === "GET" && url.pathname === "/health") {
-      return json(res, 200, { ok: true, pid: process.pid, backend: BACKEND, model: BACKEND === "openai" ? MODEL.name : `claude:${MODEL.claudeModel}`, notify: readState().notify ?? notifySupported() });
+      return json(res, 200, { ok: true, pid: process.pid, backend: BACKEND, model: describeBackend(), notify: readState().notify ?? notifySupported() });
     }
     if (req.method === "POST" && url.pathname === "/turns") {
       const body = await readBody(req);

@@ -28,8 +28,9 @@ export const LIMITS = {
 };
 
 // Translation backend.
-//   claude-cli : `claude -p --model haiku` (default; uses your subscription, ~5s)
-//   openai     : any OpenAI-compatible endpoint (ECHO_MODEL_BASE_URL / _API_KEY / _NAME)
+//   pi-cli     : `pi -p` (pi coding agent; its providers/plans apply — e.g. GLM Coding Plan lists pi as a supported tool). ~1.7s
+//   openai     : any OpenAI-compatible endpoint (ECHO_MODEL_BASE_URL / _API_KEY / _NAME). ~1.5s
+//   claude-cli : `claude -p --model haiku` (default fallback; your subscription, ~5-9s)
 export const BACKEND = process.env.ECHO_BACKEND || (process.env.ECHO_MODEL_BASE_URL ? "openai" : "claude-cli");
 // Cheapest model, thinking off: this is a two-sentence translation, not reasoning.
 // ECHO_MODEL_EXTRA merges extra JSON into the request body (e.g. '{"thinking":{"type":"disabled"}}' for GLM,
@@ -46,4 +47,5 @@ export const MODEL = {
   name: process.env.ECHO_MODEL_NAME || "glm-4.5-flash",
   extra: process.env.ECHO_MODEL_EXTRA ? JSON.parse(process.env.ECHO_MODEL_EXTRA) : guessExtra(process.env.ECHO_MODEL_BASE_URL),
   claudeModel: process.env.ECHO_CLAUDE_MODEL || "haiku",
+  piModel: process.env.ECHO_PI_MODEL || "zai-coding-cn/glm-5.3-flash",
 };
