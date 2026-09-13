@@ -49,21 +49,28 @@ export function simulatedAgentReply(text) {
   return complete(AGENT_PROMPT, text).then((s) => s.trim());
 }
 
-export async function complete(system, user) {
-  if (BACKEND === "openai") return completeOpenAI(system, user);
-  return completeClaudeCli(system, user);
+export { PROMPTS };
+
+// A backend spec: {type:"openai", baseUrl, apiKey, name, extra} | {type:"claude-cli", model}
+export const DEFAULT_BACKEND = BACKEND === "openai"
+  ? { type: "openai", baseUrl: MODEL.baseUrl, apiKey: MODEL.apiKey, name: MODEL.name, extra: MODEL.extra }
+  : { type: "claude-cli", model: MODEL.claudeModel };
+
+export async function complete(system, user, backend = DEFAULT_BACKEND) {
+  if (backend.type === "openai") return completeOpenAI(system, user, backend);
+  return completeClaudeCli(system, user, backend);
 }
 
-async function completeOpenAI(system, user) {
-  const res = await fetch(`${MODEL.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+async function completeOpenAI(system, user, b) {
+  const res = await fetch(`${b.baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${MODEL.apiKey}` },
+    headers: { "content-type": "application/json", authorization: `Bearer ${b.apiKey}` },
     body: JSON.stringify({
-      model: MODEL.name,
+      model: b.name,
       messages: [{ role: "system", content: system }, { role: "user", content: user }],
       temperature: 0.2,
       max_tokens: 200,
-      ...MODEL.extra,
+      ...(b.extra || {}),
     }),
   });
   if (!res.ok) throw new Error(`model http ${res.status}: ${(await res.text()).slice(0, 200)}`);
@@ -71,14 +78,14 @@ async function completeOpenAI(system, user) {
   return json.choices?.[0]?.message?.content ?? "";
 }
 
-function completeClaudeCli(system, user) {
+function completeClaudeCli(system, user, b) {
   return new Promise((resolve, reject) => {
     // Strip nested-session markers so `claude -p` runs even when echo was started from inside Claude Code.
     // ECHO_INTERNAL: echo's own hooks see it and exit, so the translation call never recurses.
     const env = { ...process.env, ECHO_INTERNAL: "1" };
     for (const k of Object.keys(env)) if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_ENTRYPOINT")) delete env[k];
     // --tools "": pure text completion, no tool use.
-    const child = spawn("claude", ["-p", "--model", MODEL.claudeModel, "--output-format", "text", "--tools", "", "--system-prompt", system, "--", user], {
+    const child = spawn("claude", ["-p", "--model", b.model, "--output-format", "text", "--tools", "", "--system-prompt", system, "--", user], {
       env, stdio: ["ignore", "pipe", "pipe"], cwd: process.env.HOME,
     });
     let out = "", err = "";

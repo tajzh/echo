@@ -9,6 +9,7 @@ WorkingDirectory=/home/jj/projects/echo
 Environment=HOME=/home/jj
 Environment=PATH=/home/jj/.local/bin:/home/jj/.nvm/versions/node/v22.22.2/bin:/usr/local/bin:/usr/bin:/bin
 Environment=ECHO_PORT=4319
+EnvironmentFile=-/home/jj/.echo/model.env
 ExecStart=/home/jj/.nvm/versions/node/v22.22.2/bin/node core/server.mjs
 Restart=on-failure
 RestartSec=3
