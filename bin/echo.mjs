@@ -16,7 +16,8 @@ const HELP = `echo — learn English from the conversations you already have wit
   echo dose "<text>"                one-shot: what you just said, in English
   echo today                        today's digest
   echo demo                         scripted end-to-end turn
-  echo hook <cc-prompt|cc-stop|cursor-prompt|cursor-response>   (stdin JSON from the agent's hook)
+  echo snippet claude-code|codex|cursor   print user-level hook config
+  echo hook <cc-prompt|cc-stop|codex-prompt|codex-stop|cursor-prompt|cursor-response>   (stdin JSON from the agent's hook)
   echo statusline                   (stdin JSON from the CLI status line)
 `;
 
@@ -142,9 +143,23 @@ async function main() {
       const input = await readStdinJson();
       const ok = await ensureServer();
       if (!ok) { if (kind === "cursor-prompt") console.log('{"continue":true}'); return; }
-      const post = (role, text, session, source) => text && text.trim() && api("POST", "/turns", { role, text, session, source });
-      if (kind === "cc-prompt") { await post("user", input.prompt, input.session_id, "claude-code"); return; }
-      if (kind === "cc-stop") { await post("agent", lastAssistantText(input.transcript_path), input.session_id, "claude-code"); return; }
+      const post = (role, text, session, source, wait = false) => text && text.trim() && api("POST", `/turns${wait ? "?wait=1" : ""}`, { role, text, session, source });
+      // Claude Code and Codex share the same hook wire format. The dose is shown *inside the harness*
+      // as the Stop hook's systemMessage: visible to you, never sent to the model.
+      if (kind === "cc-prompt" || kind === "codex-prompt") {
+        await post("user", input.prompt, input.session_id, kind === "cc-prompt" ? "claude-code" : "codex");
+        console.log('{"suppressOutput":true}'); return;
+      }
+      if (kind === "cc-stop" || kind === "codex-stop") {
+        if (input.stop_hook_active) { console.log("{}"); return; }
+        const reply = input.last_assistant_message || lastAssistantText(input.transcript_path);
+        await post("agent", reply, input.session_id, kind === "cc-stop" ? "claude-code" : "codex", true);
+        // You said was started at prompt time; by now it is normally done. Give it a moment if not.
+        let d = await api("GET", `/dose/latest?session=${encodeURIComponent(input.session_id || "")}`);
+        for (let i = 0; i < 40 && d.you_said?.status === "pending"; i++) { await new Promise((r) => setTimeout(r, 250)); d = await api("GET", `/dose/latest?session=${encodeURIComponent(input.session_id || "")}`); }
+        const msg = renderDose(d, { color: false });
+        console.log(JSON.stringify({ systemMessage: msg })); return;
+      }
       if (kind === "cursor-prompt") { await post("user", input.prompt, input.conversation_id, "cursor"); console.log('{"continue":true}'); return; }
       if (kind === "cursor-response") { await post("agent", input.text, input.conversation_id, "cursor"); console.log("{}"); return; }
       console.error(`unknown hook kind ${kind}`); process.exit(1);
@@ -170,6 +185,13 @@ async function main() {
           },
           statusLine: { type: "command", command: `node ${bin} statusline` },
         }, null, 2));
+      } else if (args[0] === "codex") {
+        console.log(`// ~/.codex/hooks.json  (project-level .codex/hooks.json only loads once the project's .codex layer is trusted)`);
+        console.log(JSON.stringify({ hooks: {
+          UserPromptSubmit: [{ hooks: [{ type: "command", command: `node ${bin} hook codex-prompt`, timeout: 10 }] }],
+          Stop: [{ hooks: [{ type: "command", command: `node ${bin} hook codex-stop`, timeout: 60, statusMessage: "echo" }] }],
+        } }, null, 2));
+        console.log(`\n// then in codex run /hooks once to trust them`);
       } else if (args[0] === "cursor") {
         console.log(`// ~/.cursor/hooks.json`);
         console.log(JSON.stringify({ version: 1, hooks: {
@@ -178,7 +200,7 @@ async function main() {
         } }, null, 2));
         console.log(`\n// merge into ~/.cursor/cli-config.json`);
         console.log(JSON.stringify({ statusLine: { type: "command", command: `node ${bin} statusline`, padding: 1 } }, null, 2));
-      } else { console.error("usage: echo snippet claude-code|cursor"); process.exit(1); }
+      } else { console.error("usage: echo snippet claude-code|codex|cursor"); process.exit(1); }
       return;
     }
 
