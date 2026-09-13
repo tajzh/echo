@@ -1,10 +1,8 @@
-# echo
+# Echo
 
-在你和 agent 本来就在进行的对话里学英语。agent 不需要知道它存在。
+在你和 coding agent 本来就在进行的对话里学英语。agent 不需要知道它存在。
 
-## 它做什么
-
-你照常用中文和任何 agent 工作。每一轮，echo 在旁边给你两行一眼能扫完的英文：
+Echo 是一个本地桌面程序（macOS / Windows / Linux）。打开它，选好你在用的 harness（Claude Code、Codex、ZCode、Cursor），点「接入」；之后你照常用中文和 agent 工作，每一轮 Echo 给你两行一眼能扫完的英文：
 
 ```
 ▸ You said: Can you check why this function leaks memory?
@@ -14,44 +12,71 @@
 - **You said**：你刚说的话，英文怎么说。意思你已经知道，只是看"英文怎么说"，几乎不费力。
 - **In short**：agent 这轮回复的一句话英文结论。
 - 剂量上限固定（30 词 / 20 词），不随消息长度涨。正文永远是中文；不读这两行，工作一点不受影响。
-- 旋钮只管一件事：`echo level 1` 后你想试着用英文写，`You said` 的位置变成 `Better:` 纠正版。不逼、不提醒。
-- 后台默默记录；`echo today` 一分钟看完今天你说过的话的英文版。
+- 强度只有一个开关：Lv 1 后你想试着用英文写，`You said` 变成 `Better:`（原生工程师会怎么说）。不逼、不提醒。
+- 点英文里的任何一个词或句尾的 ★ 收藏；今天说过的话的英文版都在「回声」页里。
 
-## 架构
+## 安装
 
-```
-你 ──中文──▶ [任意 agent] ──中文回复──▶ 你
-        │                    │
-        └──── adapter ───────┘   把每轮 user/agent 文本 POST 给 core
-                   │
-              echo core（本机 127.0.0.1:4319）
-              ├─ 剂量生成：echo 自己的小模型（不是主 agent）
-              ├─ 记录：~/.echo/turns.jsonl（后续换 SQLite）
-              ├─ 旋钮：level / on-off
-              └─ 展示：status line / GET /dose/latest / 日终摘要
-```
+从 [Releases](../../releases) 下载对应平台的包（`.dmg` / `.exe` / `.AppImage`），打开 Echo：
 
-英文由 echo 自己的小模型生成，不依赖主 agent 配合——这是它"任何 agent 都能用"的原因。适配器只做一件事：把对话轮次喂给 core。见 [adapters/README.md](adapters/README.md)。
+1. **Harness** 页：Echo 会检测本机装了哪些 harness。点「接入」，Echo 往该 harness 的用户级配置里写两条 hook；有的 harness 还差一步（Codex 要 `/hooks` 信任一次，ZCode 要新开 session），页面会告诉你。
+2. **模型** 页：选一个给 Echo 做翻译和概括的便宜模型。已登录的 `pi`（如 GLM Coding Plan）、ZCode 自带 CLI、Claude Code、或任意 OpenAI 兼容端点 + key。「测试一次」看耗时和译文，再「保存并启用」。
+3. **设置** 页：窗口置顶、登录时启动、系统通知。
 
-## 试一下（demo）
+Echo 收进托盘（菜单栏）后台工作；关掉 Echo，hook 就静默，agent 不受影响。所有数据只在本机 `~/.echo/`。
+
+开发运行：
 
 ```bash
-cd ~/projects/echo
-node bin/echo.mjs demo                 # 一轮模拟对话，看两行英文
-node bin/echo.mjs dose "帮我看看这个函数为什么会内存泄漏"
-node bin/echo.mjs today
-
-# 在本仓库里开 claude 或 cursor agent：项目级 hooks 已配好，每轮自动记录，
-# Claude Code 的 status line 会显示最近一轮的两行英文。
-claude
+npm install
+npm run icons     # 生成图标（一次）
+npm start         # Electron 应用
+npm run core      # 只跑 core（服务器 / 公网 demo 用）
+npm run dist      # 打当前平台的包 → release/
 ```
 
-装到全局（任何目录里的 Claude Code / Cursor 都生效）：`node bin/echo.mjs snippet claude-code`、`node bin/echo.mjs snippet cursor`，按提示合并到用户配置。
+## 工作原理
 
-## 后端
+```
+你 ──中文──▶ [Claude Code / Codex / ZCode / Cursor] ──中文回复──▶ 你
+                     │ hook（curl）                      │ hook（curl）
+                     ▼                                   ▼
+              Echo（本机 127.0.0.1:4319，桌面程序内嵌）
+              ├─ 两行英文：Echo 自己的小模型（不是主 agent）
+              ├─ 展示：Echo 窗口（可置顶）/ 系统通知 / CLI 里的 Stop 消息与状态栏
+              └─ 记录：~/.echo/（对话、译文、收藏、配置）
+```
 
-默认用 `claude -p --model haiku`（走你的订阅，约 5–9 秒，异步出现在状态栏）。有 OpenAI 兼容端点时设 `ECHO_MODEL_BASE_URL` / `ECHO_MODEL_API_KEY` / `ECHO_MODEL_NAME`，延迟到 1 秒内。
+- **接入 = 写 hook**。hook 命令是一行 `curl`，把该轮的文本发给本机 Echo，等 Echo 回两行；harness 侧不需要装任何东西。Echo 不在时 curl 失败即退出，harness 无感。
+- **英文由 Echo 自己的模型生成**，主 agent 的上下文一个字不多。这是它能接任何 harness 的原因。
+- **模型走已登录的工具**（`pi -p`、`zcode --prompt`、`claude -p`）或直连 OpenAI 兼容端点；在 Echo 里可切换、可测试。Echo 自己的模型调用不会再触发 hook（core 侧按在途文本过滤）。
+
+各 harness 能显示什么、有什么坑，见 [adapters/README.md](adapters/README.md)。
+
+## CLI
+
+桌面程序是产品；`bin/echo.mjs` 给服务器、脚本和终端用户：
+
+```bash
+node bin/echo.mjs setup                  # harness 状态；setup claude-code on|off 接入 / 移除
+node bin/echo.mjs snippet cursor         # 打印会写入的 hook 配置
+node bin/echo.mjs start | status | app   # 不用桌面程序时跑 core；app 在浏览器里打开同一套界面
+node bin/echo.mjs dose "帮我看看这个函数为什么会内存泄漏"
+node bin/echo.mjs today
+```
+
+## 目录
+
+```
+app/      Electron 壳：内嵌 core、托盘、窗口、开机自启
+core/     本地服务：hook 协议、模型后端、harness 接入、存储、通知
+web/      界面（app.html 桌面与浏览器共用；index.html 公网 demo）
+bin/      CLI
+deploy/   公网 demo 的 systemd / Caddy 配置
+```
 
 ## 状态
 
-`0.0.1-demo`。做了：core、CLI、Claude Code 与 Cursor 的 hooks 适配、status line 展示、0/1 档、日终摘要。没做：词汇模型与间隔重复、Codex 代理适配、hub/飞书适配、多会话隔离（当前状态栏显示全局最近一轮）、日终推送。
+`0.1.0`。做了：桌面程序（托盘、置顶、自启、通知）、Harness 一键接入/移除（4 家）、模型后端可配可测（4 种）、两行剂量、Lv 0/1、收藏、今日回顾、CI 三平台打包。
+
+没做：安装包签名与公证（首次打开需在系统里允许）、词汇模型与间隔重复、多会话隔离（窗口显示全局最近一轮）、Gemini CLI 适配、ZCode CLI 后端的实机验证。

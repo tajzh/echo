@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import { BACKEND, MODEL, LIMITS, PATHS } from "./config.mjs";
 
@@ -71,27 +72,39 @@ export function describeBackend(b = currentBackend()) {
   return b.type === "openai" ? `${b.name}` : `${b.type.replace("-cli", "")}:${b.model}`;
 }
 
+// User texts currently being sent to a model. hooks.mjs uses this to recognise our own CLI calls.
+export const inflight = new Set();
+
 export async function complete(system, user, backend = currentBackend()) {
-  if (backend.type === "openai") return completeOpenAI(system, user, backend);
-  if (backend.type === "pi-cli") return completePiCli(system, user, backend);
-  if (backend.type === "zcode-cli") return completeZcodeCli(system, user, backend);
-  return completeClaudeCli(system, user, backend);
+  inflight.add(user);
+  try {
+    if (backend.type === "openai") return await completeOpenAI(system, user, backend);
+    if (backend.type === "pi-cli") return await completePiCli(system, user, backend);
+    if (backend.type === "zcode-cli") return await completeZcodeCli(system, user, backend);
+    return await completeClaudeCli(system, user, backend);
+  } finally { setTimeout(() => inflight.delete(user), 5000); }
 }
 
 // ZCode's bundled CLI, headless. Undocumented by Z.ai (community-verified); --mode plan = no edits/commands.
 async function completeZcodeCli(system, user, b) {
-  const args = ["--prompt", `${system}\n\n---\n${user}`, "--mode", "plan", "--no-color", "--json", "--cwd", process.env.HOME];
+  const args = ["--prompt", `${system}\n\n---\n${user}`, "--mode", "plan", "--no-color", "--json", "--cwd", os.homedir()];
   if (b.model) args.push("--model", b.model);
   const out = await runCli("zcode", args, "zcode --prompt");
   try { const j = JSON.parse(out); return j.result ?? j.text ?? j.output ?? j.message ?? j.content ?? out; } catch { return out; }
 }
 
+// Windows: CLIs are .cmd shims, which need a shell; quote each argument for cmd.exe.
+const winQuote = (a) => `"${String(a).replace(/(["\\])/g, "\\$1").replace(/[&|<>^%]/g, "^$&")}"`;
+
 function runCli(cmd, args, label) {
   return new Promise((resolve, reject) => {
-    // ECHO_INTERNAL: echo's own hooks see it and exit, so the model call never recurses into echo.
+    // ECHO_INTERNAL is a courtesy for anything else watching; our own hooks are filtered core-side via `inflight`.
     const env = { ...process.env, ECHO_INTERNAL: "1" };
     for (const k of Object.keys(env)) if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_ENTRYPOINT")) delete env[k];
-    const child = spawn(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"], cwd: process.env.HOME });
+    const win = process.platform === "win32";
+    const child = win
+      ? spawn(`${cmd} ${args.map(winQuote).join(" ")}`, { env, stdio: ["ignore", "pipe", "pipe"], cwd: os.homedir(), shell: true, windowsHide: true })
+      : spawn(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"], cwd: os.homedir() });
     let out = "", err = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));

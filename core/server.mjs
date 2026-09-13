@@ -1,25 +1,26 @@
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { HOST, PORT, PATHS, ensureHome, BACKEND } from "./config.mjs";
 import { appendTurn, updateTurn, latest, turnsSince, readState, writeState, readFavorites, toggleFavorite, onChange } from "./store.mjs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { dose, simulatedAgentReply, describeBackend, complete, currentBackend, PROMPTS } from "./translate.mjs";
-import { harnessStatus, setHarness, backendOptions, readConfig, writeConfig, maskBackend } from "./setup.mjs";
+import { harnessStatus, setHarness, snippet, backendOptions, readConfig, writeConfig, maskBackend } from "./setup.mjs";
 import { notify, notifySupported } from "./notify.mjs";
+import { handleHook, renderDose } from "./hooks.mjs";
 
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web");
+const PKG = JSON.parse(fs.readFileSync(path.resolve(WEB_DIR, "../package.json"), "utf8"));
 
-// echo core: a tiny local HTTP daemon. Adapters POST conversation turns here;
-// the core generates the English dose asynchronously and serves it back.
+// echo core: a small local HTTP daemon, embedded in the desktop app or run standalone.
+// Harness hooks POST here (via curl); the app UI and CLI read from here.
 //
-//   POST /turns          {role:"user"|"agent", text, session?, source?}   -> {turn}
-//   GET  /dose/latest    [?session=]  -> {you_said, in_short, level, pending}
-//   GET  /today          -> today's digest
-//   GET  /state  | POST /state {level?, enabled?}
-//   GET  /health
-
-ensureHome();
+//   POST /hook/<kind>     harness hook payload on stdin -> harness-specific response
+//   GET  /statusline      one/two ANSI lines for CLI status bars
+//   POST /turns           {role:"user"|"agent", text, session?, source?}   -> {turn}
+//   GET  /dose/latest     [?session=]  -> {you_said, in_short, level, pending}
+//   GET  /today | /recent | /favorites | /state | /setup | /health | /events (SSE)
 
 function json(res, code, body) {
   res.writeHead(code, { "content-type": "application/json" });
@@ -30,14 +31,14 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     let s = "";
     req.on("data", (d) => (s += d));
-    req.on("end", () => { try { resolve(s ? JSON.parse(s) : {}); } catch (e) { reject(e); } });
+    req.on("end", () => { try { resolve(s.trim() ? JSON.parse(s) : {}); } catch { resolve({}); } });
     req.on("error", reject);
   });
 }
 
-function log(...a) {
+export function log(...a) {
   const line = `${new Date().toISOString()} ${a.join(" ")}\n`;
-  fs.appendFileSync(PATHS.log, line);
+  try { fs.appendFileSync(PATHS.log, line); } catch {}
 }
 
 async function generate(turn) {
@@ -71,8 +72,7 @@ async function maybeNotify(session) {
 function doseView(session) {
   const u = latest({ session, role: "user" });
   const a = latest({ session, role: "agent" });
-  // Only show the agent line if it belongs to the same exchange (came after the user turn).
-  const aFresh = a && (!u || a.ts >= u.ts);
+  const aFresh = a && (!u || a.ts >= u.ts); // agent line only if it belongs to the same exchange
   return {
     level: readState().level,
     enabled: readState().enabled !== false,
@@ -95,100 +95,146 @@ function today() {
   };
 }
 
-const server = http.createServer(async (req, res) => {
+const PAGES = { "/": "index.html", "/index.html": "index.html", "/app": "app.html", "/card": "app.html" };
+
+async function route(req, res) {
   const url = new URL(req.url, `http://${HOST}`);
-  try {
-    if (req.method === "GET" && url.pathname === "/health") {
-      return json(res, 200, { ok: true, pid: process.pid, backend: BACKEND, model: describeBackend(), notify: readState().notify ?? notifySupported() });
-    }
-    if (req.method === "POST" && url.pathname === "/turns") {
-      const body = await readBody(req);
-      if (!body.text || !["user", "agent"].includes(body.role)) return json(res, 400, { error: "need role user|agent and text" });
-      if (readState().enabled === false) return json(res, 200, { skipped: "disabled" });
-      const turn = appendTurn({ role: body.role, text: body.text, session: body.session || null, source: body.source || "unknown" });
-      const p = generate(turn);
-      if (url.searchParams.get("wait") === "1") { await p; return json(res, 200, { turn: latest({ role: body.role }) }); }
-      return json(res, 202, { turn });
-    }
-    if (req.method === "GET" && url.pathname === "/dose/latest") {
-      return json(res, 200, doseView(url.searchParams.get("session") || undefined));
-    }
-    if (req.method === "GET" && url.pathname === "/today") return json(res, 200, today());
-    if (req.method === "GET" && url.pathname === "/recent") {
-      const n = Math.min(50, Number(url.searchParams.get("n") || 20));
-      const all = turnsSince(new Date(0));
-      return json(res, 200, { turns: all.slice(-n).reverse().map((t) => ({ id: t.id, ts: t.ts, role: t.role, source: t.source, session: t.session, text: t.text.slice(0, 300), en: t.en, kind: t.kind, status: t.status })) });
-    }
-    // Demo: stand-in agent so the page can show a full turn. Not part of the product.
-    if (req.method === "POST" && url.pathname === "/demo/reply") {
-      const body = await readBody(req);
-      if (!body.text) return json(res, 400, { error: "need text" });
-      const reply = await simulatedAgentReply(body.text);
-      return json(res, 200, { reply });
-    }
-    // Card: the persistent, closable, interactive surface (desktop "status line"). Live via SSE.
-    if (req.method === "GET" && url.pathname === "/events") {
-      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
-      res.write(`event: hello\ndata: {}\n\n`);
-      const off = onChange((evt) => res.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`));
-      const ka = setInterval(() => res.write(`: keepalive\n\n`), 15000);
-      req.on("close", () => { off(); clearInterval(ka); });
-      return;
-    }
-    // Settings panel: harnesses + model backend.
-    if (req.method === "GET" && url.pathname === "/setup") {
-      return json(res, 200, { harnesses: harnessStatus(), backend: maskBackend(currentBackend()), fromConfig: Boolean(readConfig().backend), backendOptions: backendOptions(), platform: process.platform, home: process.env.HOME });
-    }
-    if (req.method === "POST" && url.pathname === "/setup/harness") {
-      const body = await readBody(req);
-      try { return json(res, 200, setHarness(body.id, body.enabled)); } catch (e) { return json(res, 400, { error: e.message }); }
-    }
-    if (req.method === "POST" && url.pathname === "/setup/backend") {
-      const body = await readBody(req);
-      const b = body.backend || {};
-      if (!b.type) return json(res, 400, { error: "need backend.type" });
-      // Keep the stored key if the form sent back the masked one.
-      const prev = readConfig().backend;
-      if (b.apiKey && b.apiKey.includes("…") && prev?.apiKey) b.apiKey = prev.apiKey;
-      if (body.test) {
-        const t0 = Date.now();
-        try { const en = await complete(PROMPTS.youSaid, "这个 PR 先别合，等 QA 跑完再说", b); return json(res, 200, { ok: true, en: en.trim(), ms: Date.now() - t0 }); }
-        catch (e) { return json(res, 200, { ok: false, error: e.message, ms: Date.now() - t0 }); }
-      }
-      writeConfig({ backend: b });
-      log(`backend set: ${describeBackend(b)}`);
-      return json(res, 200, { backend: maskBackend(b) });
-    }
-    if (req.method === "GET" && url.pathname === "/favorites") return json(res, 200, { favorites: readFavorites() });
-    if (req.method === "POST" && url.pathname === "/favorites/toggle") {
-      const body = await readBody(req);
-      if (!body.text || !["word", "sentence"].includes(body.kind)) return json(res, 400, { error: "need kind word|sentence and text" });
-      return json(res, 200, toggleFavorite(body));
-    }
-    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/card")) {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-      return res.end(fs.readFileSync(path.join(WEB_DIR, url.pathname === "/card" ? "card.html" : "index.html")));
-    }
-    if (req.method === "GET" && url.pathname === "/state") return json(res, 200, readState());
-    if (req.method === "POST" && url.pathname === "/state") {
-      const body = await readBody(req);
-      const patch = {};
-      if (body.level !== undefined) patch.level = Math.max(0, Math.min(1, Number(body.level) || 0));
-      if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
-      if (body.notify !== undefined) patch.notify = Boolean(body.notify);
-      return json(res, 200, writeState(patch));
-    }
-    json(res, 404, { error: "not found" });
-  } catch (e) {
-    log(`http error ${req.method} ${url.pathname}: ${e.message}`);
-    json(res, 500, { error: String(e.message || e) });
+  const p = url.pathname;
+  if (req.method === "GET" && p === "/health") {
+    return json(res, 200, { ok: true, pid: process.pid, version: PKG.version, backend: currentBackend().type, model: describeBackend(), notify: readState().notify ?? notifySupported(), envBackend: BACKEND });
   }
-});
+  // ---- harness hooks (curl) ----
+  if (req.method === "POST" && p.startsWith("/hook/")) {
+    const r = await handleHook(p.slice(6), await readBody(req), { generate, doseView });
+    return json(res, r.status, r.body);
+  }
+  if (req.method === "GET" && p === "/statusline") {
+    res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+    return res.end(renderDose(doseView(url.searchParams.get("session") || undefined)));
+  }
+  // ---- turns ----
+  if (req.method === "POST" && p === "/turns") {
+    const body = await readBody(req);
+    if (!body.text || !["user", "agent"].includes(body.role)) return json(res, 400, { error: "need role user|agent and text" });
+    if (readState().enabled === false) return json(res, 200, { skipped: "disabled" });
+    const turn = appendTurn({ role: body.role, text: body.text, session: body.session || null, source: body.source || "unknown" });
+    const gp = generate(turn);
+    if (url.searchParams.get("wait") === "1") { await gp; return json(res, 200, { turn: latest({ role: body.role }) }); }
+    return json(res, 202, { turn });
+  }
+  if (req.method === "GET" && p === "/dose/latest") return json(res, 200, doseView(url.searchParams.get("session") || undefined));
+  if (req.method === "GET" && p === "/today") return json(res, 200, today());
+  if (req.method === "GET" && p === "/recent") {
+    const n = Math.min(200, Number(url.searchParams.get("n") || 20));
+    const all = turnsSince(new Date(0));
+    return json(res, 200, { turns: all.slice(-n).reverse().map((t) => ({ id: t.id, ts: t.ts, role: t.role, source: t.source, session: t.session, text: t.text.slice(0, 300), en: t.en, kind: t.kind, status: t.status })) });
+  }
+  // Demo: stand-in agent so the public page can show a full turn. Not part of the product.
+  if (req.method === "POST" && p === "/demo/reply") {
+    const body = await readBody(req);
+    if (!body.text) return json(res, 400, { error: "need text" });
+    return json(res, 200, { reply: await simulatedAgentReply(body.text) });
+  }
+  // ---- live updates ----
+  if (req.method === "GET" && p === "/events") {
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
+    res.write(`event: hello\ndata: {}\n\n`);
+    const off = onChange((evt) => res.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`));
+    const ka = setInterval(() => res.write(`: keepalive\n\n`), 15000);
+    req.on("close", () => { off(); clearInterval(ka); });
+    return;
+  }
+  // ---- setup: harnesses + model backend ----
+  if (req.method === "GET" && p === "/setup") {
+    return json(res, 200, {
+      harnesses: harnessStatus(), lastSeen: readState().lastSeen || {},
+      backend: maskBackend(currentBackend()), fromConfig: Boolean(readConfig().backend), backendOptions: backendOptions(),
+      platform: process.platform, home: os.homedir(), dataDir: PATHS.home, version: PKG.version, port: PORT,
+    });
+  }
+  if (req.method === "GET" && p === "/setup/snippet") {
+    try { return json(res, 200, snippet(url.searchParams.get("id"))); } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+  if (req.method === "POST" && p === "/setup/harness") {
+    const body = await readBody(req);
+    try { const r = setHarness(body.id, body.enabled); log(`harness ${body.id} ${body.enabled ? "enabled" : "disabled"}`); return json(res, 200, r); }
+    catch (e) { return json(res, 400, { error: e.message }); }
+  }
+  if (req.method === "POST" && p === "/setup/backend") {
+    const body = await readBody(req);
+    const b = body.backend || {};
+    if (!b.type) return json(res, 400, { error: "need backend.type" });
+    const prev = readConfig().backend;
+    if (b.apiKey && b.apiKey.includes("…") && prev?.apiKey) b.apiKey = prev.apiKey; // form sent back the masked key
+    if (body.test) {
+      const t0 = Date.now();
+      try { const en = await complete(PROMPTS.youSaid, "这个 PR 先别合，等 QA 跑完再说", b); return json(res, 200, { ok: true, en: en.trim(), ms: Date.now() - t0 }); }
+      catch (e) { return json(res, 200, { ok: false, error: e.message, ms: Date.now() - t0 }); }
+    }
+    writeConfig({ backend: b });
+    log(`backend set: ${describeBackend(b)}`);
+    return json(res, 200, { backend: maskBackend(b) });
+  }
+  // ---- favorites / state ----
+  if (req.method === "GET" && p === "/favorites") return json(res, 200, { favorites: readFavorites() });
+  if (req.method === "POST" && p === "/favorites/toggle") {
+    const body = await readBody(req);
+    if (!body.text || !["word", "sentence"].includes(body.kind)) return json(res, 400, { error: "need kind word|sentence and text" });
+    return json(res, 200, toggleFavorite(body));
+  }
+  if (req.method === "GET" && p === "/state") return json(res, 200, readState());
+  if (req.method === "POST" && p === "/state") {
+    const body = await readBody(req);
+    const patch = {};
+    if (body.level !== undefined) patch.level = Math.max(0, Math.min(1, Number(body.level) || 0));
+    if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
+    if (body.notify !== undefined) patch.notify = Boolean(body.notify);
+    if (body.onboarded !== undefined) patch.onboarded = Boolean(body.onboarded);
+    return json(res, 200, writeState(patch));
+  }
+  // ---- pages ----
+  if (req.method === "GET" && PAGES[p]) {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    return res.end(fs.readFileSync(path.join(WEB_DIR, PAGES[p])));
+  }
+  json(res, 404, { error: "not found" });
+}
 
-server.listen(PORT, HOST, () => {
-  fs.writeFileSync(PATHS.pid, String(process.pid));
-  log(`echo core listening on http://${HOST}:${PORT} backend=${BACKEND}`);
-  if (process.stdout.isTTY) console.log(`echo core on http://${HOST}:${PORT} (backend ${BACKEND})`);
-});
+export function createServer() {
+  return http.createServer(async (req, res) => {
+    try { await route(req, res); }
+    catch (e) { log(`http error ${req.method} ${req.url}: ${e.message}`); if (!res.headersSent) json(res, 500, { error: String(e.message || e) }); }
+  });
+}
 
-for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { try { fs.unlinkSync(PATHS.pid); } catch {} process.exit(0); });
+// Start the core on 127.0.0.1:PORT. Resolves {server, port} or, if an echo core already owns the
+// port (e.g. started by the CLI), {server:null, port, existing:true}.
+export async function startCore() {
+  ensureHome();
+  const server = createServer();
+  return new Promise((resolve, reject) => {
+    server.once("error", async (e) => {
+      if (e.code !== "EADDRINUSE") return reject(e);
+      try { const r = await fetch(`http://${HOST}:${PORT}/health`); if (r.ok) return resolve({ server: null, port: PORT, existing: true }); } catch {}
+      reject(new Error(`port ${PORT} is taken by something that is not echo`));
+    });
+    server.listen(PORT, HOST, () => {
+      fs.writeFileSync(PATHS.pid, String(process.pid));
+      log(`echo core ${PKG.version} listening on http://${HOST}:${PORT} model=${describeBackend()}`);
+      resolve({ server, port: PORT });
+    });
+  });
+}
+
+export function stopCore(server) {
+  try { fs.unlinkSync(PATHS.pid); } catch {}
+  server?.close();
+}
+
+// `node core/server.mjs` — standalone (CLI, demo server, systemd).
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  const { server, existing } = await startCore();
+  if (existing) { console.log(`echo core already running on http://${HOST}:${PORT}`); process.exit(0); }
+  if (process.stdout.isTTY) console.log(`echo core on http://${HOST}:${PORT} (model ${describeBackend()})`);
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { stopCore(server); process.exit(0); });
+}

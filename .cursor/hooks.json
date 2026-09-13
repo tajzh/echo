@@ -2,10 +2,10 @@
   "version": 1,
   "hooks": {
     "beforeSubmitPrompt": [
-      { "command": "node bin/echo.mjs hook cursor-prompt", "timeout": 10 }
+      { "command": "curl -sf -m 10 -X POST http://127.0.0.1:4319/hook/cursor-prompt --data-binary @- || exit 0", "timeout": 10 }
     ],
     "afterAgentResponse": [
-      { "command": "node bin/echo.mjs hook cursor-response", "timeout": 10 }
+      { "command": "curl -sf -m 10 -X POST http://127.0.0.1:4319/hook/cursor-response --data-binary @- || exit 0", "timeout": 10 }
     ]
   }
 }

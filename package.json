@@ -1,13 +1,37 @@
 {
   "name": "echo",
-  "version": "0.0.1-demo",
-  "description": "Learn English from the conversations you already have with your agents. Agent-agnostic observer: a local core plus thin adapters.",
+  "productName": "Echo",
+  "version": "0.1.0",
+  "description": "Learn English from the conversations you already have with your coding agents. A local app that hooks into Claude Code, Codex, ZCode and Cursor and shows what you said, in English.",
   "type": "module",
   "private": true,
+  "main": "app/main.mjs",
   "bin": { "echo": "bin/echo.mjs" },
   "engines": { "node": ">=22" },
   "scripts": {
-    "start": "node core/server.mjs",
-    "demo": "node bin/echo.mjs demo"
+    "start": "electron .",
+    "core": "node core/server.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "demo": "node bin/echo.mjs demo",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "app.echo.desktop",
+    "productName": "Echo",
+    "artifactName": "Echo-${version}-${os}-${arch}.${ext}",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": ["app/**", "core/**", "web/**", "bin/**", "package.json"],
+    "asar": true,
+    "mac": { "category": "public.app-category.education", "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }, { "target": "zip", "arch": ["arm64", "x64"] }], "hardenedRuntime": false, "identity": null },
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
+    "nsis": { "oneClick": true, "perMachine": false },
+    "linux": { "target": ["AppImage"], "category": "Education", "maintainer": "echo", "desktopName": "echo.desktop", "synopsis": "Learn English from your agent conversations" }
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.0.0"
   }
 }

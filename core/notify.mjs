@@ -3,14 +3,20 @@ import { spawn } from "node:child_process";
 // Display driver: OS notification (toast). Used where the harness has no user-facing hook
 // channel — Claude Desktop, Codex Desktop, ZCode, Cursor IDE. Runs on the same machine as the core.
 
+// The desktop app plugs in Electron's native Notification here; standalone core falls back to OS tools.
+let custom = null;
+export function setNotifier(fn) { custom = fn; }
+
 export function notifySupported() {
   if (process.env.ECHO_NOTIFY === "0") return false;
+  if (custom) return true;
   if (process.platform === "darwin" || process.platform === "win32") return true;
   return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 }
 
 export function notify(title, body) {
   if (!notifySupported()) return Promise.resolve(false);
+  if (custom) return Promise.resolve(custom(title, body)).then(() => true, () => false);
   const p = process.platform;
   let cmd, args;
   if (p === "darwin") {

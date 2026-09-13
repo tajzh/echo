@@ -4,33 +4,39 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { BASE_URL, PATHS, ensureHome } from "../core/config.mjs";
+import { renderDose } from "../core/hooks.mjs";
+import { harnessStatus, setHarness, snippet } from "../core/setup.mjs";
+
+// Echo CLI. The desktop app is the product; this is for servers, scripts and people who live in a terminal.
+// Harness hooks do not go through here any more (they are plain curl against the core), but `echo hook`
+// still works as a stdin→core forwarder for custom setups.
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const [cmd, ...args] = process.argv.slice(2);
 
 const HELP = `echo — learn English from the conversations you already have with your agents
 
-  echo start | stop | status        run the local core (127.0.0.1:4319)
+  echo start | stop | status        run the local core (127.0.0.1:4319) without the desktop app
+  echo app                          open the app UI in a browser (the core serves it)
+  echo setup                        show harness status;  echo setup <harness> on|off  to hook / unhook
+  echo snippet <harness>            print the user-level hook config Echo would write
   echo on | off                     enable / disable the dose
   echo level 0|1                    0: write Chinese, see "You said"   1: try English, see "Better"
-  echo card                         open the persistent card (live, starrable, always-on-top via 置顶)
-  echo notify on|off                OS toast per turn (default on where a desktop is detected)
+  echo notify on|off                OS toast per turn
   echo dose "<text>"                one-shot: what you just said, in English
   echo today                        today's digest
   echo demo                         scripted end-to-end turn
-  echo snippet claude-code|codex|zcode|cursor   print user-level hook config
-  echo hook <cc|codex|zcode>-<prompt|stop> | cursor-prompt | cursor-response   (stdin JSON from the agent's hook)
-  echo statusline                   (stdin JSON from the CLI status line)
+  echo hook <kind>                  forward a hook payload from stdin to the core (kind: cc-prompt, cc-stop, codex-*, zcode-*, cursor-prompt, cursor-response)
+  echo statusline                   print the current dose for a CLI status bar
+
+  harnesses: claude-code | codex | zcode | cursor
 `;
 
 async function api(method, p, body) {
   const res = await fetch(BASE_URL + p, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   return res.json();
 }
-
-async function healthy() {
-  try { const r = await fetch(BASE_URL + "/health"); return r.ok; } catch { return false; }
-}
+async function healthy() { try { const r = await fetch(BASE_URL + "/health"); return r.ok; } catch { return false; } }
 
 async function ensureServer() {
   if (await healthy()) return true;
@@ -44,51 +50,21 @@ async function ensureServer() {
   return false;
 }
 
-function readStdinJson() {
+function readStdin() {
   return new Promise((resolve) => {
     let s = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (d) => (s += d));
-    process.stdin.on("end", () => { try { resolve(s.trim() ? JSON.parse(s) : {}); } catch { resolve({}); } });
-    if (process.stdin.isTTY) resolve({});
+    process.stdin.on("end", () => resolve(s));
+    if (process.stdin.isTTY) resolve("");
   });
-}
-
-// Claude Code transcript (JSONL): text of the assistant turn(s) since the last human message.
-function lastAssistantText(transcriptPath) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return "";
-  const lines = fs.readFileSync(transcriptPath, "utf8").split("\n").filter(Boolean);
-  const texts = [];
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let e; try { e = JSON.parse(lines[i]); } catch { continue; }
-    const content = e.message?.content;
-    if (e.type === "user") {
-      const isHuman = typeof content === "string" || (Array.isArray(content) && content.some((c) => c.type === "text"));
-      if (isHuman) break;
-    }
-    if (e.type === "assistant" && Array.isArray(content)) {
-      for (const c of content) if (c.type === "text" && c.text) texts.unshift(c.text);
-    }
-  }
-  return texts.join("\n").trim();
 }
 
 const DIM = "\x1b[2m", CYAN = "\x1b[36m", GREEN = "\x1b[32m", YEL = "\x1b[33m", RESET = "\x1b[0m";
 
-function renderDose(d, { color = true } = {}) {
-  const c = (code, s) => (color ? code + s + RESET : s);
-  const lines = [];
-  if (d.you_said) {
-    const label = d.you_said.kind === "better" ? "Better" : "You said";
-    const txt = d.you_said.status === "pending" ? "…" : d.you_said.status === "error" ? "(unavailable)" : d.you_said.text;
-    lines.push(`${c(CYAN, "▸ " + label + ":")} ${txt}`);
-  }
-  if (d.in_short) {
-    const txt = d.in_short.status === "pending" ? "…" : d.in_short.status === "error" ? "(unavailable)" : d.in_short.text;
-    lines.push(`${c(GREEN, "▸ In short:")} ${txt}`);
-  }
-  if (!lines.length) lines.push(c(DIM, "▸ echo: waiting for your first message"));
-  return lines.join("\n");
+function openUrl(url) {
+  const opener = process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
+  spawn(opener[0], opener[1], { detached: true, stdio: "ignore" }).on("error", () => {}).unref();
 }
 
 async function main() {
@@ -99,7 +75,7 @@ async function main() {
     case "start": {
       const ok = await ensureServer();
       const h = ok ? await api("GET", "/health") : null;
-      console.log(ok ? `echo core running (pid ${h.pid}, backend ${h.backend}/${h.model})` : "failed to start; see " + PATHS.log);
+      console.log(ok ? `echo core running (pid ${h.pid}, model ${h.model})` : "failed to start; see " + PATHS.log);
       return;
     }
     case "stop": {
@@ -109,34 +85,38 @@ async function main() {
     case "status": {
       if (!(await healthy())) { console.log("echo core: not running"); return; }
       const h = await api("GET", "/health"); const s = await api("GET", "/state");
-      console.log(`echo core: running (pid ${h.pid}) backend=${h.backend}/${h.model} level=${s.level} enabled=${s.enabled !== false}`);
+      console.log(`echo core: running (pid ${h.pid}) model=${h.model} level=${s.level} enabled=${s.enabled !== false}`);
       console.log(renderDose(await api("GET", "/dose/latest")));
       return;
+    }
+    case "app": case "card": {
+      await ensureServer(); openUrl(BASE_URL + "/app"); console.log(`app: ${BASE_URL}/app`); return;
     }
     case "on": case "off":
       await ensureServer(); console.log(await api("POST", "/state", { enabled: cmd === "on" })); return;
     case "level":
       await ensureServer(); console.log(await api("POST", "/state", { level: Number(args[0] ?? 0) })); return;
-    case "card": {
-      await ensureServer();
-      const url = BASE_URL + "/card";
-      const opener = process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
-      spawn(opener[0], opener[1], { detached: true, stdio: "ignore" }).on("error", () => {}).unref();
-      console.log(`card: ${url}  (click 置顶 for an always-on-top window in Chrome/Edge)`);
-      return;
-    }
     case "notify":
       await ensureServer(); console.log(await api("POST", "/state", { notify: args[0] !== "off" })); return;
 
+    case "setup": {
+      if (args[0]) { const r = setHarness(args[0], args[1] !== "off"); console.log(`${r.label}: ${r.enabled ? "hooked" : "unhooked"}  (${r.file})`); if (r.enabled) console.log(DIM + r.after + RESET); return; }
+      for (const h of harnessStatus()) console.log(`${h.enabled ? GREEN + "●" : h.present ? YEL + "○" : DIM + "·"}${RESET} ${h.label.padEnd(12)} ${h.enabled ? "hooked" : h.present ? "detected, not hooked" : "not detected"}   ${DIM}${h.file}${RESET}`);
+      return;
+    }
+    case "snippet": {
+      try { console.log(JSON.stringify(snippet(args[0]), null, 2)); } catch (e) { console.error(e.message); process.exit(1); }
+      return;
+    }
+
     case "dose": {
-      const text = args.join(" ").trim() || (await readStdinJson()).text;
+      const text = args.join(" ").trim() || (await readStdin()).trim();
       if (!text) { console.error("usage: echo dose \"<text>\""); process.exit(1); }
       await ensureServer();
       const r = await api("POST", "/turns?wait=1", { role: "user", text, source: "cli" });
       console.log(renderDose({ you_said: { text: r.turn.en, kind: r.turn.kind, status: r.turn.status } }));
       return;
     }
-
     case "today": {
       await ensureServer();
       const t = await api("GET", "/today");
@@ -148,84 +128,17 @@ async function main() {
       return;
     }
 
-    // ---- adapters: hooks ----
+    // Forwarders — equivalent to the curl commands Echo installs, for setups that prefer a node entry point.
     case "hook": {
-      const kind = args[0];
-      if (process.env.ECHO_INTERNAL) { if (kind === "cursor-prompt") console.log('{"continue":true}'); return; } // never observe our own model calls
-      const input = await readStdinJson();
-      const ok = await ensureServer();
-      if (!ok) { if (kind === "cursor-prompt") console.log('{"continue":true}'); return; }
-      const post = (role, text, session, source, wait = false) => text && text.trim() && api("POST", `/turns${wait ? "?wait=1" : ""}`, { role, text, session, source });
-      // Claude Code and Codex share the same hook wire format. The dose is shown *inside the harness*
-      // as the Stop hook's systemMessage: visible to you, never sent to the model.
-      // ZCode uses the same wire format (snake_case aliases) but has no user-facing hook output: the core's toast shows the dose.
-      const SRC = { cc: "claude-code", codex: "codex", zcode: "zcode" };
-      const [fam, ev] = kind.split("-");
-      if (SRC[fam] && ev === "prompt") {
-        await post("user", input.prompt, input.session_id, SRC[fam]);
-        console.log(fam === "zcode" ? "{}" : '{"suppressOutput":true}'); return;
-      }
-      if (SRC[fam] && ev === "stop") {
-        if (input.stop_hook_active) { console.log("{}"); return; }
-        const reply = input.last_assistant_message || lastAssistantText(input.transcript_path);
-        if (fam === "zcode") { await post("agent", reply, input.session_id, SRC[fam]); console.log("{}"); return; } // nothing to show inline; don't block
-        await post("agent", reply, input.session_id, SRC[fam], true);
-        // You said was started at prompt time; by now it is normally done. Give it a moment if not.
-        let d = await api("GET", `/dose/latest?session=${encodeURIComponent(input.session_id || "")}`);
-        for (let i = 0; i < 40 && d.you_said?.status === "pending"; i++) { await new Promise((r) => setTimeout(r, 250)); d = await api("GET", `/dose/latest?session=${encodeURIComponent(input.session_id || "")}`); }
-        const msg = renderDose(d, { color: false });
-        console.log(JSON.stringify({ systemMessage: msg })); return;
-      }
-      if (kind === "cursor-prompt") { await post("user", input.prompt, input.conversation_id, "cursor"); console.log('{"continue":true}'); return; }
-      if (kind === "cursor-response") { await post("agent", input.text, input.conversation_id, "cursor"); console.log("{}"); return; }
-      console.error(`unknown hook kind ${kind}`); process.exit(1);
+      const body = await readStdin();
+      if (!(await healthy())) { if (args[0] === "cursor-prompt") console.log('{"continue":true}'); return; }
+      const res = await fetch(`${BASE_URL}/hook/${args[0]}`, { method: "POST", body, headers: { "content-type": "application/json" } });
+      process.stdout.write(await res.text()); return;
     }
-
-    // ---- adapters: status line (Claude Code & Cursor CLI share the spec) ----
     case "statusline": {
-      await readStdinJson(); // session-scoped view later; single user for now
-      if (!(await healthy())) { process.stdout.write(DIM + "▸ echo: core not running (echo start)" + RESET); return; }
-      const d = await api("GET", "/dose/latest");
-      process.stdout.write(renderDose(d));
-      return;
-    }
-
-    case "snippet": {
-      const bin = path.join(ROOT, "bin/echo.mjs");
-      if (args[0] === "claude-code") {
-        console.log(`// merge into ~/.claude/settings.json`);
-        console.log(JSON.stringify({
-          hooks: {
-            UserPromptSubmit: [{ hooks: [{ type: "command", command: `node ${bin} hook cc-prompt`, timeout: 10 }] }],
-            Stop: [{ hooks: [{ type: "command", command: `node ${bin} hook cc-stop`, timeout: 10 }] }],
-          },
-          statusLine: { type: "command", command: `node ${bin} statusline` },
-        }, null, 2));
-      } else if (args[0] === "codex") {
-        console.log(`// ~/.codex/hooks.json  (project-level .codex/hooks.json only loads once the project's .codex layer is trusted)`);
-        console.log(JSON.stringify({ hooks: {
-          UserPromptSubmit: [{ hooks: [{ type: "command", command: `node ${bin} hook codex-prompt`, timeout: 10 }] }],
-          Stop: [{ hooks: [{ type: "command", command: `node ${bin} hook codex-stop`, timeout: 60, statusMessage: "echo" }] }],
-        } }, null, 2));
-        console.log(`\n// then in codex run /hooks once to trust them`);
-      } else if (args[0] === "zcode") {
-        const node = process.execPath;
-        console.log(`// merge into ~/.zcode/cli/config.json  (user scope only; project-level hooks are ignored by ZCode; use "command" form, not "args")`);
-        console.log(JSON.stringify({ hooks: { enabled: true, events: {
-          UserPromptSubmit: [{ hooks: [{ type: "command", command: `"${node}" "${bin}" hook zcode-prompt`, timeoutMs: 10000 }] }],
-          Stop: [{ hooks: [{ type: "command", command: `"${node}" "${bin}" hook zcode-stop`, timeoutMs: 10000 }] }],
-        } } }, null, 2));
-        console.log(`\n// start a new ZCode session afterwards (hooks are snapshotted at session start). The dose arrives as a system notification.`);
-      } else if (args[0] === "cursor") {
-        console.log(`// ~/.cursor/hooks.json`);
-        console.log(JSON.stringify({ version: 1, hooks: {
-          beforeSubmitPrompt: [{ command: `node ${bin} hook cursor-prompt`, timeout: 10 }],
-          afterAgentResponse: [{ command: `node ${bin} hook cursor-response`, timeout: 10 }],
-        } }, null, 2));
-        console.log(`\n// merge into ~/.cursor/cli-config.json`);
-        console.log(JSON.stringify({ statusLine: { type: "command", command: `node ${bin} statusline`, padding: 1 } }, null, 2));
-      } else { console.error("usage: echo snippet claude-code|codex|zcode|cursor"); process.exit(1); }
-      return;
+      await readStdin();
+      if (!(await healthy())) { process.stdout.write(DIM + "▸ echo: not running" + RESET); return; }
+      process.stdout.write(await (await fetch(BASE_URL + "/statusline")).text()); return;
     }
 
     case "demo": {

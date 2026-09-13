@@ -1,14 +1,14 @@
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/bin/echo.mjs\" hook cc-prompt", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "curl -sf -m 10 -X POST http://127.0.0.1:4319/hook/cc-prompt --data-binary @- || exit 0", "timeout": 10 } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/bin/echo.mjs\" hook cc-stop", "timeout": 60 } ] }
+      { "hooks": [ { "type": "command", "command": "curl -sf -m 60 -X POST http://127.0.0.1:4319/hook/cc-stop --data-binary @- || exit 0", "timeout": 60 } ] }
     ]
   },
   "statusLine": {
     "type": "command",
-    "command": "node bin/echo.mjs statusline"
+    "command": "curl -sf -m 3 http://127.0.0.1:4319/statusline || exit 0"
   }
 }
