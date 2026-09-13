@@ -1,7 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import { HOST, PORT, PATHS, ensureHome, BACKEND, MODEL } from "./config.mjs";
-import { appendTurn, updateTurn, latest, turnsSince, readState, writeState } from "./store.mjs";
+import { appendTurn, updateTurn, latest, turnsSince, readState, writeState, readFavorites, toggleFavorite, onChange } from "./store.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { dose, simulatedAgentReply } from "./translate.mjs";
@@ -125,9 +125,24 @@ const server = http.createServer(async (req, res) => {
       const reply = await simulatedAgentReply(body.text);
       return json(res, 200, { reply });
     }
-    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
+    // Card: the persistent, closable, interactive surface (desktop "status line"). Live via SSE.
+    if (req.method === "GET" && url.pathname === "/events") {
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
+      res.write(`event: hello\ndata: {}\n\n`);
+      const off = onChange((evt) => res.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`));
+      const ka = setInterval(() => res.write(`: keepalive\n\n`), 15000);
+      req.on("close", () => { off(); clearInterval(ka); });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/favorites") return json(res, 200, { favorites: readFavorites() });
+    if (req.method === "POST" && url.pathname === "/favorites/toggle") {
+      const body = await readBody(req);
+      if (!body.text || !["word", "sentence"].includes(body.kind)) return json(res, 400, { error: "need kind word|sentence and text" });
+      return json(res, 200, toggleFavorite(body));
+    }
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/card")) {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-      return res.end(fs.readFileSync(path.join(WEB_DIR, "index.html")));
+      return res.end(fs.readFileSync(path.join(WEB_DIR, url.pathname === "/card" ? "card.html" : "index.html")));
     }
     if (req.method === "GET" && url.pathname === "/state") return json(res, 200, readState());
     if (req.method === "POST" && url.pathname === "/state") {

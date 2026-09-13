@@ -62,6 +62,8 @@ async function completeOpenAI(system, user) {
       model: MODEL.name,
       messages: [{ role: "system", content: system }, { role: "user", content: user }],
       temperature: 0.2,
+      max_tokens: 200,
+      ...MODEL.extra,
     }),
   });
   if (!res.ok) throw new Error(`model http ${res.status}: ${(await res.text()).slice(0, 200)}`);

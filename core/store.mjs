@@ -31,6 +31,7 @@ export function appendTurn(turn) {
   };
   load().push(rec);
   fs.appendFileSync(PATHS.turns, JSON.stringify(rec) + "\n");
+  emitChange({ type: "turn", turn: rec });
   return rec;
 }
 
@@ -41,6 +42,7 @@ export function updateTurn(id, patch) {
   all[idx] = { ...all[idx], ...patch };
   // Rewrite whole file; fine at demo scale.
   fs.writeFileSync(PATHS.turns, all.map((t) => JSON.stringify(t)).join("\n") + "\n");
+  emitChange({ type: "turn", turn: all[idx] });
   return all[idx];
 }
 
@@ -59,6 +61,30 @@ export function turnsSince(date) {
   const cutoff = date.getTime();
   return load().filter((t) => new Date(t.ts).getTime() >= cutoff);
 }
+
+// ---- favorites: words / sentences you starred from the card, with the sentence they came from ----
+const FAV_PATH = PATHS.favorites;
+
+export function readFavorites() {
+  ensureHome();
+  try { return JSON.parse(fs.readFileSync(FAV_PATH, "utf8")); } catch { return []; }
+}
+
+export function toggleFavorite({ kind, text, context }) {
+  const all = readFavorites();
+  const key = (kind === "word" ? text.toLowerCase() : text).trim();
+  const idx = all.findIndex((f) => f.kind === kind && f.key === key);
+  let on;
+  if (idx >= 0) { all.splice(idx, 1); on = false; }
+  else { all.unshift({ kind, key, text: text.trim(), context: (context || "").trim(), ts: new Date().toISOString() }); on = true; }
+  fs.writeFileSync(FAV_PATH, JSON.stringify(all, null, 2));
+  return { on, favorites: all };
+}
+
+// ---- live updates ----
+const listeners = new Set();
+export function onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
+export function emitChange(evt) { for (const fn of listeners) { try { fn(evt); } catch {} } }
 
 export function readState() {
   ensureHome();

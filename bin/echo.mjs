@@ -13,6 +13,7 @@ const HELP = `echo — learn English from the conversations you already have wit
   echo start | stop | status        run the local core (127.0.0.1:4319)
   echo on | off                     enable / disable the dose
   echo level 0|1                    0: write Chinese, see "You said"   1: try English, see "Better"
+  echo card                         open the persistent card (live, starrable, always-on-top via 置顶)
   echo notify on|off                OS toast per turn (default on where a desktop is detected)
   echo dose "<text>"                one-shot: what you just said, in English
   echo today                        today's digest
@@ -116,6 +117,14 @@ async function main() {
       await ensureServer(); console.log(await api("POST", "/state", { enabled: cmd === "on" })); return;
     case "level":
       await ensureServer(); console.log(await api("POST", "/state", { level: Number(args[0] ?? 0) })); return;
+    case "card": {
+      await ensureServer();
+      const url = BASE_URL + "/card";
+      const opener = process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
+      spawn(opener[0], opener[1], { detached: true, stdio: "ignore" }).on("error", () => {}).unref();
+      console.log(`card: ${url}  (click 置顶 for an always-on-top window in Chrome/Edge)`);
+      return;
+    }
     case "notify":
       await ensureServer(); console.log(await api("POST", "/state", { notify: args[0] !== "off" })); return;
 
