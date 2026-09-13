@@ -13,11 +13,12 @@ const HELP = `echo — learn English from the conversations you already have wit
   echo start | stop | status        run the local core (127.0.0.1:4319)
   echo on | off                     enable / disable the dose
   echo level 0|1                    0: write Chinese, see "You said"   1: try English, see "Better"
+  echo notify on|off                OS toast per turn (default on where a desktop is detected)
   echo dose "<text>"                one-shot: what you just said, in English
   echo today                        today's digest
   echo demo                         scripted end-to-end turn
-  echo snippet claude-code|codex|cursor   print user-level hook config
-  echo hook <cc-prompt|cc-stop|codex-prompt|codex-stop|cursor-prompt|cursor-response>   (stdin JSON from the agent's hook)
+  echo snippet claude-code|codex|zcode|cursor   print user-level hook config
+  echo hook <cc|codex|zcode>-<prompt|stop> | cursor-prompt | cursor-response   (stdin JSON from the agent's hook)
   echo statusline                   (stdin JSON from the CLI status line)
 `;
 
@@ -115,6 +116,8 @@ async function main() {
       await ensureServer(); console.log(await api("POST", "/state", { enabled: cmd === "on" })); return;
     case "level":
       await ensureServer(); console.log(await api("POST", "/state", { level: Number(args[0] ?? 0) })); return;
+    case "notify":
+      await ensureServer(); console.log(await api("POST", "/state", { notify: args[0] !== "off" })); return;
 
     case "dose": {
       const text = args.join(" ").trim() || (await readStdinJson()).text;
@@ -146,14 +149,18 @@ async function main() {
       const post = (role, text, session, source, wait = false) => text && text.trim() && api("POST", `/turns${wait ? "?wait=1" : ""}`, { role, text, session, source });
       // Claude Code and Codex share the same hook wire format. The dose is shown *inside the harness*
       // as the Stop hook's systemMessage: visible to you, never sent to the model.
-      if (kind === "cc-prompt" || kind === "codex-prompt") {
-        await post("user", input.prompt, input.session_id, kind === "cc-prompt" ? "claude-code" : "codex");
-        console.log('{"suppressOutput":true}'); return;
+      // ZCode uses the same wire format (snake_case aliases) but has no user-facing hook output: the core's toast shows the dose.
+      const SRC = { cc: "claude-code", codex: "codex", zcode: "zcode" };
+      const [fam, ev] = kind.split("-");
+      if (SRC[fam] && ev === "prompt") {
+        await post("user", input.prompt, input.session_id, SRC[fam]);
+        console.log(fam === "zcode" ? "{}" : '{"suppressOutput":true}'); return;
       }
-      if (kind === "cc-stop" || kind === "codex-stop") {
+      if (SRC[fam] && ev === "stop") {
         if (input.stop_hook_active) { console.log("{}"); return; }
         const reply = input.last_assistant_message || lastAssistantText(input.transcript_path);
-        await post("agent", reply, input.session_id, kind === "cc-stop" ? "claude-code" : "codex", true);
+        if (fam === "zcode") { await post("agent", reply, input.session_id, SRC[fam]); console.log("{}"); return; } // nothing to show inline; don't block
+        await post("agent", reply, input.session_id, SRC[fam], true);
         // You said was started at prompt time; by now it is normally done. Give it a moment if not.
         let d = await api("GET", `/dose/latest?session=${encodeURIComponent(input.session_id || "")}`);
         for (let i = 0; i < 40 && d.you_said?.status === "pending"; i++) { await new Promise((r) => setTimeout(r, 250)); d = await api("GET", `/dose/latest?session=${encodeURIComponent(input.session_id || "")}`); }
@@ -192,6 +199,14 @@ async function main() {
           Stop: [{ hooks: [{ type: "command", command: `node ${bin} hook codex-stop`, timeout: 60, statusMessage: "echo" }] }],
         } }, null, 2));
         console.log(`\n// then in codex run /hooks once to trust them`);
+      } else if (args[0] === "zcode") {
+        const node = process.execPath;
+        console.log(`// merge into ~/.zcode/cli/config.json  (user scope only; project-level hooks are ignored by ZCode; use "command" form, not "args")`);
+        console.log(JSON.stringify({ hooks: { enabled: true, events: {
+          UserPromptSubmit: [{ hooks: [{ type: "command", command: `"${node}" "${bin}" hook zcode-prompt`, timeoutMs: 10000 }] }],
+          Stop: [{ hooks: [{ type: "command", command: `"${node}" "${bin}" hook zcode-stop`, timeoutMs: 10000 }] }],
+        } } }, null, 2));
+        console.log(`\n// start a new ZCode session afterwards (hooks are snapshotted at session start). The dose arrives as a system notification.`);
       } else if (args[0] === "cursor") {
         console.log(`// ~/.cursor/hooks.json`);
         console.log(JSON.stringify({ version: 1, hooks: {
@@ -200,7 +215,7 @@ async function main() {
         } }, null, 2));
         console.log(`\n// merge into ~/.cursor/cli-config.json`);
         console.log(JSON.stringify({ statusLine: { type: "command", command: `node ${bin} statusline`, padding: 1 } }, null, 2));
-      } else { console.error("usage: echo snippet claude-code|codex|cursor"); process.exit(1); }
+      } else { console.error("usage: echo snippet claude-code|codex|zcode|cursor"); process.exit(1); }
       return;
     }
 

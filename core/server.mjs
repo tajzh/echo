@@ -5,6 +5,7 @@ import { appendTurn, updateTurn, latest, turnsSince, readState, writeState } fro
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { dose, simulatedAgentReply } from "./translate.mjs";
+import { notify, notifySupported } from "./notify.mjs";
 
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web");
 
@@ -45,10 +46,25 @@ async function generate(turn) {
     const r = await dose(turn.role, turn.text, { level });
     updateTurn(turn.id, { en: r.en, kind: r.kind, status: "done", latency_ms: Date.now() - t0 });
     log(`dose ${turn.role}/${r.kind} ${Date.now() - t0}ms: ${r.en}`);
+    if (turn.role === "agent") await maybeNotify(turn.session);
   } catch (e) {
     updateTurn(turn.id, { status: "error", error: String(e.message || e) });
     log(`dose error ${turn.role}: ${e.message}`);
   }
+}
+
+// One toast per exchange, once In short is ready. Waits briefly for You said if it is still running.
+async function maybeNotify(session) {
+  const st = readState();
+  if (st.notify === false || (st.notify === undefined && !notifySupported())) return;
+  let d = doseView(session);
+  for (let i = 0; i < 40 && d.you_said?.status === "pending"; i++) { await new Promise((r) => setTimeout(r, 250)); d = doseView(session); }
+  const lines = [];
+  if (d.you_said?.status === "done") lines.push(`${d.you_said.kind === "better" ? "Better" : "You said"}: ${d.you_said.text}`);
+  if (d.in_short?.status === "done") lines.push(`In short: ${d.in_short.text}`);
+  if (!lines.length) return;
+  const ok = await notify("echo", lines.join("\n"));
+  log(`notify ${ok ? "sent" : "failed"} (${process.platform})`);
 }
 
 function doseView(session) {
@@ -82,7 +98,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}`);
   try {
     if (req.method === "GET" && url.pathname === "/health") {
-      return json(res, 200, { ok: true, pid: process.pid, backend: BACKEND, model: BACKEND === "openai" ? MODEL.name : `claude:${MODEL.claudeModel}` });
+      return json(res, 200, { ok: true, pid: process.pid, backend: BACKEND, model: BACKEND === "openai" ? MODEL.name : `claude:${MODEL.claudeModel}`, notify: readState().notify ?? notifySupported() });
     }
     if (req.method === "POST" && url.pathname === "/turns") {
       const body = await readBody(req);
@@ -119,6 +135,7 @@ const server = http.createServer(async (req, res) => {
       const patch = {};
       if (body.level !== undefined) patch.level = Math.max(0, Math.min(1, Number(body.level) || 0));
       if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
+      if (body.notify !== undefined) patch.notify = Boolean(body.notify);
       return json(res, 200, writeState(patch));
     }
     json(res, 404, { error: "not found" });
