@@ -41,7 +41,15 @@ function tidy(s) {
   return (s || "").trim().replace(/^["'“”]+|["'“”]+$/g, "").replace(/\s+/g, " ");
 }
 
-async function complete(system, user) {
+// Demo only: a stand-in coding agent so the web page can show a full turn without a real IDE.
+const AGENT_PROMPT = `You are a senior software engineer acting as an AI coding assistant. The user is a Chinese engineer.
+Reply in Chinese, concise and concrete (at most 120 Chinese characters), no markdown headings. If asked to write code, give a short snippet.`;
+
+export function simulatedAgentReply(text) {
+  return complete(AGENT_PROMPT, text).then((s) => s.trim());
+}
+
+export async function complete(system, user) {
   if (BACKEND === "openai") return completeOpenAI(system, user);
   return completeClaudeCli(system, user);
 }

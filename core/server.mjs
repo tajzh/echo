@@ -2,7 +2,11 @@ import http from "node:http";
 import fs from "node:fs";
 import { HOST, PORT, PATHS, ensureHome, BACKEND, MODEL } from "./config.mjs";
 import { appendTurn, updateTurn, latest, turnsSince, readState, writeState } from "./store.mjs";
-import { dose } from "./translate.mjs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { dose, simulatedAgentReply } from "./translate.mjs";
+
+const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web");
 
 // echo core: a tiny local HTTP daemon. Adapters POST conversation turns here;
 // the core generates the English dose asynchronously and serves it back.
@@ -93,6 +97,22 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, doseView(url.searchParams.get("session") || undefined));
     }
     if (req.method === "GET" && url.pathname === "/today") return json(res, 200, today());
+    if (req.method === "GET" && url.pathname === "/recent") {
+      const n = Math.min(50, Number(url.searchParams.get("n") || 20));
+      const all = turnsSince(new Date(0));
+      return json(res, 200, { turns: all.slice(-n).reverse().map((t) => ({ id: t.id, ts: t.ts, role: t.role, source: t.source, session: t.session, text: t.text.slice(0, 300), en: t.en, kind: t.kind, status: t.status })) });
+    }
+    // Demo: stand-in agent so the page can show a full turn. Not part of the product.
+    if (req.method === "POST" && url.pathname === "/demo/reply") {
+      const body = await readBody(req);
+      if (!body.text) return json(res, 400, { error: "need text" });
+      const reply = await simulatedAgentReply(body.text);
+      return json(res, 200, { reply });
+    }
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      return res.end(fs.readFileSync(path.join(WEB_DIR, "index.html")));
+    }
     if (req.method === "GET" && url.pathname === "/state") return json(res, 200, readState());
     if (req.method === "POST" && url.pathname === "/state") {
       const body = await readBody(req);

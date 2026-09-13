@@ -1,0 +1,17 @@
+[Unit]
+Description=echo demo core (learn English from agent conversations)
+After=network.target
+
+[Service]
+Type=simple
+User=jj
+WorkingDirectory=/home/jj/projects/echo
+Environment=HOME=/home/jj
+Environment=PATH=/home/jj/.local/bin:/home/jj/.nvm/versions/node/v22.22.2/bin:/usr/local/bin:/usr/bin:/bin
+Environment=ECHO_PORT=4319
+ExecStart=/home/jj/.nvm/versions/node/v22.22.2/bin/node core/server.mjs
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

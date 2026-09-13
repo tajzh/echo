@@ -1,0 +1,15 @@
+# echo demo（执行会话 2026-09-13）：/echo/* → 本机 4319（~/projects/echo core）。basicauth 复用 jj/guardian。
+redir /echo /echo/ 308
+handle_path /echo/* {
+	basicauth {
+		jj {args.0}
+		guardian {args.1}
+	}
+	reverse_proxy 127.0.0.1:4319 {
+		header_up X-Real-IP {remote_host}
+		header_up -Authorization
+		transport http {
+			read_timeout 600s
+		}
+	}
+}
