@@ -1,0 +1,9 @@
+# Echo download page: static, no auth by design (shareable installers). Files published by deploy/publish-downloads.mjs.
+redir /echo-download /echo-download/ 308
+handle_path /echo-download/* {
+	root * /srv/echo-download
+	header /*.zip Content-Disposition attachment
+	header /*.exe Content-Disposition attachment
+	header /*.AppImage Content-Disposition attachment
+	file_server
+}
