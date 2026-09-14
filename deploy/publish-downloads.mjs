@@ -10,8 +10,8 @@ const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"))
 const REL = path.join(ROOT, "release");
 
 const TARGETS = [
-  { id: "mac-arm64", os: "macOS", sub: "Apple Silicon（M1 及以后）", match: /mac-arm64\.zip$/, primary: true },
-  { id: "mac-x64", os: "macOS", sub: "Intel", match: /mac-x64\.zip$/ },
+  { id: "mac-arm64", os: "macOS", sub: "Apple Silicon（M1 及以后）", match: /mac-arm64\.(dmg|zip)$/, primary: true },
+  { id: "mac-x64", os: "macOS", sub: "Intel", match: /mac-x64\.(dmg|zip)$/ },
   { id: "win-x64", os: "Windows", sub: "10 / 11，64 位", match: /win-x64\.(exe|zip)$/ },
   { id: "linux-x64", os: "Linux", sub: "AppImage，x86_64", match: /linux-x86_64\.AppImage$/ },
 ];
@@ -24,7 +24,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 
 const rows = [];
 for (const t of TARGETS) {
-  const f = files.find((x) => t.match.test(x));
+  const f = files.filter((x) => t.match.test(x)).sort((a, b) => /\.(dmg|exe)$/.test(b) - /\.(dmg|exe)$/.test(a))[0]; // installers first
   if (!f) { rows.push({ ...t, missing: true }); continue; }
   const src = path.join(REL, f), dst = path.join(outDir, f);
   fs.copyFileSync(src, dst);
@@ -80,7 +80,7 @@ const html = `<!doctype html>
 
   <h2>各平台说明</h2>
   <details open><summary>macOS</summary><ul>
-    <li>解压 zip，把 <code>Echo.app</code> 拖到「应用程序」。</li>
+    <li>打开 dmg，把 <code>Echo.app</code> 拖到「应用程序」。</li>
     <li>首次打开若提示「无法验证开发者」：右键 → 打开；或 系统设置 → 隐私与安全性 → 仍要打开。</li>
     <li>若提示「已损坏」（未签名包从浏览器下载会被隔离）：终端执行 <code>xattr -cr /Applications/Echo.app</code> 后再打开。</li>
     <li>Echo 住在菜单栏；关窗口不退出。</li>
